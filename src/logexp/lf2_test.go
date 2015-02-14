@@ -2,6 +2,7 @@ package logexp
 
 import (
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,8 +10,89 @@ import (
 	"testing"
 )
 
+func init() {
+	log.SetFlags(log.Llongfile | log.LstdFlags)
+}
+
 const PROT_RDWR = syscall.PROT_READ | syscall.PROT_WRITE
 const offsetEntrySize = 4 + 4 // 32-bit counter, 32-bit data offset
+
+func BenchmarkWALWrite(b *testing.B) {
+	if exists("testdata") {
+		panic("testdata directory already exists, clean clean it out")
+	}
+	if err := os.Mkdir("testdata", 0755); err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll("testdata")
+
+	wal := newTestWAL()
+	if err := wal.Open(); err != nil {
+		panic(err)
+	}
+	defer wal.Close()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		data := []byte("hello-" + strconv.Itoa(i+1))
+		n, err := wal.Write(data)
+		if err != nil {
+			panic(err)
+		}
+		if n != len(data) {
+			b.Fatal("bytes written does not match bytes given")
+		}
+	}
+}
+
+func BenchmarkWALRead(b *testing.B) {
+	if exists("testdata") {
+		panic("testdata directory already exists, clean clean it out")
+	}
+	if err := os.Mkdir("testdata", 0755); err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll("testdata")
+
+	wal := newTestWAL()
+	if err := wal.Open(); err != nil {
+		panic(err)
+	}
+	defer wal.Close()
+
+	for i := 0; i < b.N; i++ {
+		data := []byte("hello-" + strconv.Itoa(i+1))
+		n, err := wal.Write(data)
+		if err != nil {
+			panic(err)
+		}
+		if n != len(data) {
+			b.Fatal("bytes written does not match bytes given")
+		}
+	}
+	b.ResetTimer()
+	inputlen := 1 << 10
+	buf := make([]byte, inputlen)
+	var (
+		msgs                    [][]byte
+		lastcounter, newcounter int
+		err                     error
+	)
+	for i := 0; i < b.N; {
+		buf, msgs, newcounter, err = wal.Fetch(buf, lastcounter)
+		if err != nil {
+			panic(err)
+		}
+		i += len(msgs)
+		for i, msg := range msgs {
+			exp := "hello-" + strconv.Itoa(newcounter+i)
+			if string(msg) != exp {
+				b.Fatalf("msg %d: expected %s but got %s", newcounter+i, exp, string(msg))
+			}
+		}
+		lastcounter = newcounter + len(msgs) - 1
+	}
+}
 
 func TestNewWAL(t *testing.T) {
 	if exists("testdata") {
@@ -148,11 +230,11 @@ func TestWALWriteReadMany(t *testing.T) {
 }
 
 type WAL struct {
-	size, buffersize int
-	numbuffers       int
-	dir              string
-	buffers          pool
-	counter          int64
+	buffersize int
+	numbuffers int
+	dir        string
+	buffers    pool
+	counter    int64
 }
 
 func mustAbs(path string) string {
@@ -166,8 +248,7 @@ func mustAbs(path string) string {
 func NewWAL() *WAL {
 	// override these defaults by calling the appropriate setters
 	return &WAL{
-		1 << 30,
-		0, // buffersize is calculated in Create() and Open()
+		100 << 20,
 		10,
 		mustAbs("wal"),
 		nil,
@@ -175,8 +256,8 @@ func NewWAL() *WAL {
 	}
 }
 
-func (w *WAL) Size(n int) {
-	w.size = n
+func (w *WAL) BufferSize(n int) {
+	w.buffersize = n
 }
 
 func (w *WAL) NumBuffers(n int) {
@@ -203,13 +284,6 @@ func (w *WAL) Open() error {
 		panic("not implemented")
 	}
 	var buffers pool
-
-	const minBufferSize = 1 << 20 // 1 MiB
-	w.buffersize = (w.size / w.numbuffers)
-	if w.buffersize < minBufferSize {
-		w.buffersize = minBufferSize
-	}
-
 	for i := 0; i < w.numbuffers; i++ {
 		buffername := "buffer-" + strconv.Itoa(i+1)
 		buffer, err := newBuffer(w.filepath(buffername), w.buffersize, &w.counter)
@@ -409,29 +483,39 @@ func (b *buffer) Write(buf []byte) (int, error) {
 		// we write the starting counter at the very start of the buffer
 		putLittleEndianInt64(b.offsetbuf[b.noff:], counter)
 		b.noff += 8
+		b.firstCounter = int(counter)
 	}
 	offset := b.nbuf
+	// write the msg length in the buffer
 	putLittleEndianUint32(b.buf[offset:], uint32(len(buf)))
 	n := copy(b.buf[offset+4:], buf)
 	b.nbuf += n + 4
-	putLittleEndianUint32(b.offsetbuf[b.noff:], uint32(counter-int64(b.firstCounter)))
+	// write the counter in the offset buffer
+	relativeCounter := uint32(counter - int64(b.firstCounter))
+	putLittleEndianUint32(b.offsetbuf[b.noff:], relativeCounter)
 	b.noff += 4
+	// write the offset in the offset buffer
 	putLittleEndianUint32(b.offsetbuf[b.noff:], uint32(offset))
+	b.noff += 4
 	b.lastCounter = int(counter)
 	return n, nil
 }
 
 func (b *buffer) Fetch(buf []byte, from int) ([]byte, [][]byte, int, error) {
-	offset, counter := b.offsetAfter(from)
+	counter, offset := b.nextOffset(from)
 	if offset < 0 {
 		return buf, nil, from, nil
 	}
 	wbuf := buf
 	msgs := make([][]byte, 0, 10)
 
+	lim := offset + 4 + len(buf)
+	if lim > len(b.buf) {
+		lim = len(b.buf)
+	}
 	// we mlock to cause the scheduler to schedule another
 	// goroutine while we block on IO here
-	if err := syscall.Mlock(b.buf[offset : offset+4+len(buf)]); err != nil {
+	if err := syscall.Mlock(b.buf[offset:lim]); err != nil {
 		return nil, nil, 0, os.NewSyscallError("mlock", err)
 	}
 
@@ -470,26 +554,22 @@ func (b *buffer) Fetch(buf []byte, from int) ([]byte, [][]byte, int, error) {
 }
 
 func (b *buffer) hasMoreAfter(counter int) bool {
-	return counter >= b.firstCounter && counter < b.lastCounter
+	return counter < b.lastCounter
 }
 
-func (b *buffer) offsetAfter(from int) (int, int) {
-	if from < b.firstCounter {
-		return 0, b.firstCounter
+func (b *buffer) nextOffset(last int) (int, int) {
+	if last < b.firstCounter {
+		return b.firstCounter, 0
 	}
-	if from > b.lastCounter {
+	if last >= b.lastCounter {
 		return -1, -1
 	}
 	buf := b.offsetbuf[8:]
-	for len(buf) > 0 {
-		counter, offset := decodeCounterAndOffset(buf)
-		counter += b.firstCounter
-		buf = buf[8:]
-		if counter > from {
-			return offset, counter
-		}
-	}
-	panic("ran off the end of the offset buffer")
+	next := last + 1
+	relcnt := next - b.firstCounter
+	buf = buf[relcnt*8:]
+	counter, offset := decodeCounterAndOffset(buf)
+	return counter + b.firstCounter, offset
 }
 
 func putLittleEndianUint32(buf []byte, n uint32) {
@@ -512,7 +592,7 @@ func putLittleEndianInt64(buf []byte, sn int64) {
 }
 
 func getLittleEndianUint32(buf []byte) uint32 {
-	return uint32((buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | (buf[0]))
+	return uint32(buf[3])<<24 | uint32(buf[2])<<16 | uint32(buf[1])<<8 | uint32(buf[0])
 }
 
 func decodeMsgLen(buf []byte) int {
@@ -538,6 +618,8 @@ func (b *buffer) zero() error {
 	}
 	b.nbuf = 0
 	b.noff = 0
+	b.firstCounter = -1
+	b.lastCounter = -1
 	return nil
 }
 
@@ -613,7 +695,7 @@ func (p pool) rotate() {
 
 func newTestWAL() *WAL {
 	wal := NewWAL()
-	wal.Size(1 << 10)
+	wal.BufferSize(1 << 20)
 	wal.NumBuffers(10)
 	wal.Dir("testdata/wal")
 	return wal
