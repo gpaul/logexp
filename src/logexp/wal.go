@@ -2,231 +2,42 @@ package logexp
 
 import (
 	"errors"
-	"log"
+	"sync"
 	"os"
 	"path/filepath"
 	"strconv"
 	"syscall"
-	"testing"
 )
-
-func init() {
-	log.SetFlags(log.Llongfile | log.LstdFlags)
-}
 
 const PROT_RDWR = syscall.PROT_READ | syscall.PROT_WRITE
 const offsetEntrySize = 4 + 4 // 32-bit counter, 32-bit data offset
 
-func BenchmarkWALWrite(b *testing.B) {
-	if exists("testdata") {
-		panic("testdata directory already exists, clean clean it out")
-	}
-	if err := os.Mkdir("testdata", 0755); err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll("testdata")
-
-	wal := newTestWAL()
-	if err := wal.Open(); err != nil {
-		panic(err)
-	}
-	defer wal.Close()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		data := []byte("hello-" + strconv.Itoa(i+1))
-		n, err := wal.Write(data)
-		if err != nil {
-			panic(err)
-		}
-		if n != len(data) {
-			b.Fatal("bytes written does not match bytes given")
-		}
-	}
+// SyncWAL synchronizes Read/Write operations on a WAL.
+type SyncWAL struct {
+	lk sync.RWMutex
+	w *WAL
 }
 
-func BenchmarkWALRead(b *testing.B) {
-	if exists("testdata") {
-		panic("testdata directory already exists, clean clean it out")
-	}
-	if err := os.Mkdir("testdata", 0755); err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll("testdata")
-
-	wal := newTestWAL()
-	if err := wal.Open(); err != nil {
-		panic(err)
-	}
-	defer wal.Close()
-
-	for i := 0; i < b.N; i++ {
-		data := []byte("hello-" + strconv.Itoa(i+1))
-		n, err := wal.Write(data)
-		if err != nil {
-			panic(err)
-		}
-		if n != len(data) {
-			b.Fatal("bytes written does not match bytes given")
-		}
-	}
-	b.ResetTimer()
-	inputlen := 1 << 10
-	buf := make([]byte, inputlen)
-	var (
-		msgs                    [][]byte
-		lastcounter, newcounter int
-		err                     error
-	)
-	for i := 0; i < b.N; {
-		buf, msgs, newcounter, err = wal.Fetch(buf, lastcounter)
-		if err != nil {
-			panic(err)
-		}
-		i += len(msgs)
-		for i, msg := range msgs {
-			exp := "hello-" + strconv.Itoa(newcounter+i)
-			if string(msg) != exp {
-				b.Fatalf("msg %d: expected %s but got %s", newcounter+i, exp, string(msg))
-			}
-		}
-		lastcounter = newcounter + len(msgs) - 1
-	}
+func NewSyncWAL(w *WAL) *SyncWAL {
+	return &SyncWAL{w: w}
 }
 
-func TestNewWAL(t *testing.T) {
-	if exists("testdata") {
-		panic("testdata directory already exists, clean clean it out")
-	}
-	if err := os.Mkdir("testdata", 0755); err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll("testdata")
-
-	wal := newTestWAL()
-	if err := wal.Open(); err != nil {
-		panic(err)
-	}
-	defer wal.Close()
+func (s *SyncWAL) Write(buf []byte) (int, error) {
+	s.lk.Lock()
+	defer s.lk.Unlock()
+	return s.w.write(buf)
 }
 
-func TestWALWrite(t *testing.T) {
-	if exists("testdata") {
-		panic("testdata directory already exists, clean clean it out")
-	}
-	if err := os.Mkdir("testdata", 0755); err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll("testdata")
-
-	wal := newTestWAL()
-	if err := wal.Open(); err != nil {
-		panic(err)
-	}
-	defer wal.Close()
-
-	n, err := wal.Write([]byte("hello"))
-	if err != nil {
-		panic(err)
-	}
-	if n != len("hello") {
-		t.Fatal("bytes written does not match bytes given")
-	}
+func (s *SyncWAL) WriteBatch(bufs [][]byte) (bytesWritten int, msgsWritten int, err error) {
+	s.lk.Lock()
+	defer s.lk.Unlock()
+	return s.w.writeBatch(bufs)
 }
 
-func TestWALWriteRead(t *testing.T) {
-	if exists("testdata") {
-		panic("testdata directory already exists, clean clean it out")
-	}
-	if err := os.Mkdir("testdata", 0755); err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll("testdata")
-
-	wal := newTestWAL()
-	if err := wal.Open(); err != nil {
-		panic(err)
-	}
-	defer wal.Close()
-
-	n, err := wal.Write([]byte("hello"))
-	if err != nil {
-		panic(err)
-	}
-	if n != len("hello") {
-		t.Fatal("bytes written does not match bytes given")
-	}
-	inputlen := 1 << 10
-	buf, msgs, counter, err := wal.Fetch(make([]byte, inputlen), 0)
-	if err != nil {
-		panic(err)
-	}
-	if len(buf) != inputlen {
-		t.Fatal("expected input buf to be returned with same size")
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 msg, but got %d", len(msgs))
-	}
-	if counter != 1 {
-		t.Fatalf("expected counter 0, but got %d", counter)
-	}
-	if string(msgs[0]) != "hello" {
-		t.Fatalf("expected 'hello' but but '%s'", string(msgs[0]))
-	}
-}
-
-func TestWALWriteReadMany(t *testing.T) {
-	if exists("testdata") {
-		panic("testdata directory already exists, clean clean it out")
-	}
-	if err := os.Mkdir("testdata", 0755); err != nil {
-		panic(err)
-	}
-	defer os.RemoveAll("testdata")
-
-	wal := newTestWAL()
-	if err := wal.Open(); err != nil {
-		panic(err)
-	}
-	defer wal.Close()
-
-	for i := 0; i < 1e3; i++ {
-		data := []byte("hello-" + strconv.Itoa(i+1))
-		n, err := wal.Write(data)
-		if err != nil {
-			panic(err)
-		}
-		if n != len(data) {
-			t.Fatal("bytes written does not match bytes given")
-		}
-	}
-
-	inputlen := 1 << 10
-	buf := make([]byte, inputlen)
-	var (
-		msgs                    [][]byte
-		lastcounter, newcounter int
-		err                     error
-	)
-	for {
-		buf, msgs, newcounter, err = wal.Fetch(buf, lastcounter)
-		if err != nil {
-			panic(err)
-		}
-		if len(msgs) == 0 {
-			break
-		}
-		if newcounter != lastcounter+1 {
-			t.Fatalf("expected counter to increment without skipping")
-		}
-		for i, msg := range msgs {
-			exp := "hello-" + strconv.Itoa(newcounter+i)
-			if string(msg) != exp {
-				t.Fatalf("msg %d: expected %s but got %s", newcounter+i, exp, string(msg))
-			}
-		}
-		lastcounter = newcounter + len(msgs) - 1
-	}
+func (s *SyncWAL) Fetch(buf []byte, last int) ([]byte, [][]byte, int, error) {
+	s.lk.RLock()
+	defer s.lk.RUnlock()
+	return s.w.fetch(buf, last)
 }
 
 type WAL struct {
@@ -302,7 +113,7 @@ func (w *WAL) Open() error {
 	return nil
 }
 
-func (w *WAL) Write(buf []byte) (int, error) {
+func (w *WAL) write(buf []byte) (int, error) {
 	if len(buf) > w.buffersize {
 		return 0, syscall.ENOSPC
 	}
@@ -318,7 +129,18 @@ func (w *WAL) Write(buf []byte) (int, error) {
 	return 0, err
 }
 
-func (w *WAL) Fetch(buf []byte, last int) ([]byte, [][]byte, int, error) {
+func (w *WAL) writeBatch(bufs [][]byte) (bytesWritten int, msgsWritten int, err error) {
+	for i, buf := range bufs {
+		n, err := w.write(buf)
+		if err != nil {
+			return bytesWritten, i, err
+		}
+		bytesWritten += n
+	}
+	return bytesWritten, len(bufs), nil
+}
+
+func (w *WAL) fetch(buf []byte, last int) ([]byte, [][]byte, int, error) {
 	// find an appropriate buffer
 	var b *buffer
 
