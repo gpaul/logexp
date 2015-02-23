@@ -1,0 +1,8 @@
+{
+	"consumers": [
+		{
+			"raddr": "@/walcons",
+			"filters": []
+		}
+	]
+}
