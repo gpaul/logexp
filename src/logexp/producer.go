@@ -5,9 +5,9 @@ import (
 )
 
 type Producer struct {
-	filter ByteFilter
-	work Work
-	batch [][]byte
+	filter   ByteFilter
+	work     Work
+	batch    [][]byte
 	maxbatch int
 }
 
@@ -25,7 +25,7 @@ func (p *Producer) WriteMsg(msg []byte) {
 	p.batch = append(p.batch, msg)
 	select {
 	case <-p.work.Ready:
-		p.work.Batch<-p.batch
+		p.work.Batch <- p.batch
 		if len(p.batch) > p.maxbatch {
 			p.maxbatch = len(p.batch)
 		}
@@ -37,7 +37,7 @@ func (p *Producer) WriteMsg(msg []byte) {
 func (p *Producer) Flush() {
 	select {
 	case <-p.work.Ready:
-		p.work.Batch<-p.batch
+		p.work.Batch <- p.batch
 		if len(p.batch) > p.maxbatch {
 			p.maxbatch = len(p.batch)
 		}

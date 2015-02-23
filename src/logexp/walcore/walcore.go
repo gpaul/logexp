@@ -16,11 +16,22 @@ func init() {
 	log.SetFlags(log.Llongfile | log.LstdFlags)
 }
 
+type Config struct {
+	Consumers []Consumer
+}
+
+type Consumer struct {
+	Raddr string
+	// Add filter support
+	Filters []string
+}
+
 func main() {
 	dir := flag.String("dir", "wal", "the directory where the WAL will be created")
 	buffersize := flag.Int("buffersize", 100<<20, "the size in bytes of the individual WAL buffers")
 	numbuffers := flag.Int("numbuffers", 10, "the number of buffers comprising the WAL circular buffer pool")
-	listenpath := flag.String("unix-socket", "@/wal", "the path of the unix socket to listen on")
+	producepath := flag.String("producer-socket", "@/wal", "the path of the unix socket producers publish to")
+	consumepath := flag.String("tail-socket", "@/wal-cons", "the path of the unix socket consumers connect to")
 	configpath := flag.String("config", "./config.json", "the path to the config.json file")
 	flag.Parse()
 
@@ -29,11 +40,17 @@ func main() {
 	w.BufferSize(*buffersize)
 	w.NumBuffers(*numbuffers)
 
-	listener, err := net.Listen("unix", *listenpath)
+	produceL, err := net.Listen("unix", *producepath)
 	if err != nil {
 		panic(err)
 	}
-	defer listener.Close()
+	defer produceL.Close()
+
+	consumeL, err := net.Listen("unix", *consumepath)
+	if err != nil {
+		panic(err)
+	}
+	defer consumeL.Close()
 
 	if err := w.Open(); err != nil {
 		panic(err)
@@ -46,17 +63,21 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	dialConsumers(*configpath, s, &wg)
+	dialStaticConsumers(*configpath, s, &wg)
 
 	wg.Add(1)
-	go listen(listener, work, &wg)
-	log.Printf("accepting connections at %s", *listenpath)
+	go listenProducers(produceL, work, &wg)
+	log.Printf("accepting producer connections at %s", *producepath)
+
+	wg.Add(1)
+	go listenConsumers(consumeL, s, &wg)
+	log.Printf("accepting consumer connections at %s", *consumepath)
 
 	wg.Wait()
 	log.Printf("shutting down")
 }
 
-func dialConsumers(configpath string, s *logexp.SyncWAL, wg *sync.WaitGroup) {
+func dialStaticConsumers(configpath string, s *logexp.SyncWAL, wg *sync.WaitGroup) {
 	config, err := loadConfig(configpath)
 	if err != nil {
 		log.Printf("cannot load configfile: %s", configpath)
@@ -129,7 +150,7 @@ func loadConfig(configpath string) (*Config, error) {
 	return config, nil
 }
 
-func listen(listener net.Listener, work logexp.Work, wg *sync.WaitGroup) {
+func listenProducers(listener net.Listener, work logexp.Work, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for {
@@ -165,12 +186,19 @@ func read(conn net.Conn, work logexp.Work, wg *sync.WaitGroup) {
 	}
 }
 
-type Config struct {
-	Consumers []Consumer
-}
+func listenConsumers(listener net.Listener, s *logexp.SyncWAL, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-type Consumer struct {
-	Raddr string
-	// Add filter support
-	Filters []string
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("accept error: %v", err)
+			return
+		}
+
+		wg.Add(1)
+
+		// TODO(gpaul): allow consumer (waltail) to specify filters in connection setup
+		go deliver_messages(s, conn, nil, wg)
+	}
 }

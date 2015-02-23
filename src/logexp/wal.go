@@ -2,10 +2,10 @@ package logexp
 
 import (
 	"errors"
-	"sync"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 )
 
@@ -15,7 +15,7 @@ const offsetEntrySize = 4 + 4 // 32-bit counter, 32-bit data offset
 // SyncWAL synchronizes Read/Write operations on a WAL.
 type SyncWAL struct {
 	lk sync.RWMutex
-	w *WAL
+	w  *WAL
 }
 
 func NewSyncWAL(w *WAL) *SyncWAL {
@@ -141,11 +141,11 @@ func (w *WAL) writeBatch(bufs [][]byte) (bytesWritten int, msgsWritten int, err 
 }
 
 func (w *WAL) fetch(buf []byte, last int) ([]byte, [][]byte, int, error) {
-	// find an appropriate buffer
-	var b *buffer
-
 	// TODO(gpaul): when the WAL becomes lock-free we'll have
 	// to avoid the back of the buffer pool
+
+	// find an appropriate buffer
+	var b *buffer
 	for i := len(w.buffers) - 1; i >= 0; i-- {
 		if w.buffers[i].hasMoreAfter(last) {
 			b = w.buffers[i]

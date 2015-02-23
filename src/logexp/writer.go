@@ -5,7 +5,7 @@ type Work struct {
 	Batch chan [][]byte
 }
 
-func NewWriter(s *SyncWAL) (Work) {
+func NewWriter(s *SyncWAL) Work {
 	readyCh := make(chan struct{})
 
 	// we make batchCh buffered so we NEVER

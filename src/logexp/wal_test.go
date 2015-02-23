@@ -1,13 +1,13 @@
 package logexp
 
 import (
-	"time"
-	"sync"
-	"sync/atomic"
 	"log"
 	"os"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func init() {
@@ -37,25 +37,25 @@ func BenchmarkSync15Writers(b *testing.B) {
 
 	var cnt int64
 	var wg sync.WaitGroup
-	for i:=0; i<15; i++ {
+	for i := 0; i < 15; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			prod := newProducer(anyFilter, work)
 			start := time.Now()
 			lastreport := start
-			for total:=0; total<b.N;total++{
+			for total := 0; total < b.N; total++ {
 				next := atomic.AddInt64(&cnt, 1)
 				if int(next) >= b.N {
 					prod.Flush()
-					log.Printf("wrote %02.f messages/sec,maxbatchsize=%d", float64(total) / float64(time.Now().Sub(start).Seconds()), prod.maxbatch)
+					log.Printf("wrote %02.f messages/sec,maxbatchsize=%d", float64(total)/float64(time.Now().Sub(start).Seconds()), prod.maxbatch)
 					return
 				}
 				msg := "hello-" + strconv.Itoa(int(next))
 				prod.WriteMsg([]byte(msg))
 				elapsed := time.Now().Sub(lastreport)
-				if  elapsed > time.Second {
-					log.Printf("writing %02.f messages / sec", float64(total) / float64(elapsed.Seconds()))
+				if elapsed > time.Second {
+					log.Printf("writing %02.f messages / sec", float64(total)/float64(elapsed.Seconds()))
 					lastreport = time.Now()
 				}
 			}
@@ -200,12 +200,12 @@ func TestWALWriteBatch(t *testing.T) {
 	}
 	defer wal.Close()
 
-	batch := [][]byte{ []byte("hello"), []byte("there") }
+	batch := [][]byte{[]byte("hello"), []byte("there")}
 	n, nmsg, err := wal.WriteBatch(batch)
 	if err != nil {
 		panic(err)
 	}
-	if n != len("hello") + len("there") {
+	if n != len("hello")+len("there") {
 		t.Fatal("bytes written does not match bytes given")
 	}
 	if nmsg != len(batch) {
