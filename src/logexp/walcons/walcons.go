@@ -2,11 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"sync"
-	"logexp"
 	"flag"
-	"net"
 	"log"
+	"logexp"
+	"net"
+	"sync"
 )
 
 func init() {
@@ -50,7 +50,7 @@ func read(conn net.Conn, wg *sync.WaitGroup) {
 	var i int
 	dec := json.NewDecoder(conn)
 	for {
-		if i %1000 == 0 {
+		if i%1000 == 0 {
 			log.Printf("received %d messages", i)
 		}
 		var msg logexp.Message
