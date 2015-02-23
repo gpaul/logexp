@@ -29,6 +29,7 @@ func (p *Producer) WriteMsg(msg []byte) {
 		if len(p.batch) > p.maxbatch {
 			p.maxbatch = len(p.batch)
 		}
+		p.batch = nil
 	default:
 	}
 }
@@ -40,6 +41,7 @@ func (p *Producer) Flush() {
 		if len(p.batch) > p.maxbatch {
 			p.maxbatch = len(p.batch)
 		}
+		p.batch = nil
 	default:
 	}
 }
