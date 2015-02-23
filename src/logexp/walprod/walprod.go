@@ -12,6 +12,7 @@ import (
 
 func main() {
 	dialpath := flag.String("dialpath", "@/wal", "the unix socket to dial to")
+	flag.Parse()
 
 	conn, err := net.Dial("unix", *dialpath)
 	if err != nil {
